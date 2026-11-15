@@ -1,0 +1,34 @@
+{
+  "agents": [
+    {
+      "name": "superpowers",
+      "description": "Superpowers: brainstorm, spec, plan, TDD delivery discipline",
+      "pi": "~/repositories/skill-router/agents/superpowers.md",
+      "claude": "~/.claude/agents/superpowers.md"
+    },
+    {
+      "name": "ponytail",
+      "description": "Blunt, opinionated senior-engineer persona",
+      "pi": "~/repositories/skill-router/agents/ponytail.md",
+      "claude": "~/.claude/agents/ponytail.md"
+    },
+    {
+      "name": "security-audit",
+      "description": "Cloudflare's security-audit skill: threat-model and audit code",
+      "pi": "~/repositories/skill-router/agents/security-audit.md",
+      "claude": "~/.claude/agents/security-audit.md"
+    },
+    {
+      "name": "mattpocock",
+      "description": "Matt Pocock's engineering workflows: research, design, TDD, PRs",
+      "pi": "~/repositories/skill-router/agents/mattpocock.md",
+      "claude": "~/.claude/agents/mattpocock.md"
+    },
+    {
+      "name": "addyosmani",
+      "description": "Addy Osmani's engineering skills: architecture, performance, shipping",
+      "pi": "~/repositories/skill-router/agents/addyosmani.md",
+      "claude": "~/.claude/agents/addyosmani.md"
+    }
+  ]
+}
