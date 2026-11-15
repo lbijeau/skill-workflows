@@ -9,6 +9,11 @@ export const ORCHESTRATOR_ENABLED_TOOLS = ["read_file", "write_file", "task", "a
 // enabled_tools allowlist defaults to ["explore"] with ASK permission and was
 // observed not to bind the root agent at mistral-vibe 3.0.3 — hence the explicit list.
 export const GENERATED_MARKER = "# skill-workflows: generated — safe to prune";
+// The predecessor marker: skill-router generated this TOML before the ADR-011
+// extraction. A file carrying it is generated, not user-authored — this repo
+// takes it over (regenerates it with its own marker). Prune ownership stays
+// marker-strict: only skill-workflows' marker is pruned by this repo.
+export const PREDECESSOR_GENERATED_MARKER = "# skill-router: generated — safe to prune";
 
 export function renderVibeOrchestratorTOML(workflows) {
   const description = tomlEscape(normalizeText("Run multi-agent workflows: dispatch each step, verify outputs, checkpoint between steps"));
@@ -58,7 +63,8 @@ export const VIBE_ORCHESTRATOR_NAME = "workflow-orchestrator";
 export function writeVibeOrchestrator(root, wfState) {
   const file = path.join(root, "agents-vibe", `${VIBE_ORCHESTRATOR_NAME}.toml`);
   const userAuthored = () => fs.existsSync(file)
-    && !fs.readFileSync(file, "utf8").split("\n", 5).join("\n").includes(GENERATED_MARKER);
+    && !fs.readFileSync(file, "utf8").split("\n", 5).join("\n").includes(GENERATED_MARKER)
+    && !fs.readFileSync(file, "utf8").split("\n", 5).join("\n").includes(PREDECESSOR_GENERATED_MARKER);
   if (wfState?.valid && wfState.workflows.length > 0) {
     // The marker guard protects the prune path; it must protect the write
     // path too — a user-authored file at the generated path is never

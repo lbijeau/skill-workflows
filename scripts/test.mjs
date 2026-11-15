@@ -506,6 +506,157 @@ test("writeVibeOrchestrator never clobbers a user-authored file on the write pat
   clean(root);
 });
 
+// --- takeover: the old skill-router-installed artifacts are ours to re-ship ---
+
+test("syncGlobalSkills takes over a skill-router-marked installed skill (same paths, no stale double-install)", () => {
+  const root = installRoot();
+  const skillsHome = tmp();
+  w(skillsHome, "run-workflow/SKILL.md",
+    `---\nname: run-workflow\ndescription: d\n---\n<!-- Generated-style boilerplate; overwritten by skill-router install/update -->\nold\n`);
+  const r = sync.syncGlobalSkills(root, skillsHome);
+  eq(r.refused.length, 0);
+  const cur = fs.readFileSync(path.join(skillsHome, "run-workflow", "SKILL.md"), "utf8");
+  assert(cur.includes(sync.GLOBAL_SKILL_MARKER), "skill-workflows marker missing");
+  clean(root); clean(skillsHome);
+});
+
+test("syncClaudeSkills takes over a skill-router-marked installed skill", () => {
+  const root = installRoot();
+  const home = tmp();
+  w(home, "run-workflow/SKILL.md",
+    `---\nname: run-workflow\ndescription: d\n---\n<!-- Generated-style boilerplate; overwritten by skill-router install/update -->\nold\n`);
+  const r = sync.syncClaudeSkills(root, home);
+  eq(r.refused.length, 0);
+  eq(r.written.length, 1);
+  clean(root); clean(home);
+});
+
+test("writeVibeOrchestrator takes over a skill-router-generated TOML (regenerated with the skill-workflows marker)", () => {
+  const root = tmp();
+  w(root, "agents-vibe/workflow-orchestrator.toml", "# skill-router: generated — safe to prune\nold content\n");
+  const r = gen.writeVibeOrchestrator(root, { valid: true, workflows: [
+    { name: "review", description: "d", steps: [{ agent: "a", task: "t", output: "docs/out.md" }] } ] });
+  eq(r.written, true);
+  const cur = fs.readFileSync(path.join(root, "agents-vibe", "workflow-orchestrator.toml"), "utf8");
+  assert(cur.startsWith(gen.GENERATED_MARKER));
+  clean(root);
+});
+
+// --- install.mjs: the installer flow (tmp-root fixture pattern) ---
+
+import * as inst from "./install.mjs";
+
+const ONE_WF = JSON.stringify({ workflows: [
+  { name: "review", description: "Two-pass review",
+    steps: [ { agent: "a", task: "Review the code", output: "docs/out.md" } ] } ] });
+
+function installRoot() {
+  const root = tmp();
+  w(root, "agents.json", JSON.stringify({ agents: [A()] }));
+  w(root, "workflows.json", ONE_WF);
+  w(root, "global-skills/run-workflow/SKILL.md", OWNED());
+  w(root, "global-skills-claude/run-workflow/SKILL.md", OWNED());
+  return root;
+}
+
+test("runInstall syncs the pi and Claude runners to the given homes and writes the Vibe mode into skill-router's checkout", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  const r = inst.runInstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(r.exitCode, 0);
+  for (const f of ["SKILL.md", "workflows.json", "agents.json"]) {
+    assert(fs.existsSync(path.join(skillsHome, "run-workflow", f)), `pi missing ${f}`);
+    assert(fs.existsSync(path.join(claudeHome, "run-workflow", f)), `claude missing ${f}`);
+  }
+  assert(fs.readFileSync(path.join(skillsHome, "run-workflow", "workflows.json"), "utf8") === ONE_WF);
+  const toml = fs.readFileSync(path.join(vibeRoot, "agents-vibe", "workflow-orchestrator.toml"), "utf8");
+  assert(toml.startsWith(gen.GENERATED_MARKER));
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("runInstall skips the Vibe step with a message when the skill-router checkout is absent (never creates it)", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp();
+  const vibeRoot = path.join(tmp(), "no-such-checkout");
+  const r = inst.runInstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(r.exitCode, 0);
+  assert(fs.existsSync(path.join(skillsHome, "run-workflow", "SKILL.md")));
+  assert(!fs.existsSync(vibeRoot));
+  assert(r.report.some(l => /vibe orchestrator mode: skipped/.test(l) && /skill-router/.test(l)));
+  clean(root); clean(skillsHome); clean(claudeHome);
+});
+
+test("runUpdate is the same flow as runInstall", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  const r = inst.runUpdate(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(r.exitCode, 0);
+  assert(fs.existsSync(path.join(skillsHome, "run-workflow", "SKILL.md")));
+  assert(fs.existsSync(path.join(claudeHome, "run-workflow", "SKILL.md")));
+  assert(fs.existsSync(path.join(vibeRoot, "agents-vibe", "workflow-orchestrator.toml")));
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("statusOf reports workflows count, registry count, runner presence and vibe mode presence", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  const before = inst.statusOf(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(before.workflows, 1);
+  eq(before.manifestValid, true);
+  eq(before.registry, 1);
+  eq(before.piRunner, "missing");
+  eq(before.claudeRunner, "missing");
+  eq(before.vibeMode, "absent");
+  inst.runInstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  const after = inst.statusOf(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(after.piRunner, "installed");
+  eq(after.claudeRunner, "installed");
+  eq(after.vibeMode, "present");
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("statusOf surfaces a malformed manifest and a missing skill-router checkout as report lines, never errors", () => {
+  const root = installRoot();
+  w(root, "workflows.json", BAD_MANIFEST);
+  const skillsHome = tmp(); const claudeHome = tmp();
+  const vibeRoot = path.join(tmp(), "no-such-checkout");
+  const st = inst.statusOf(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(st.manifestValid, false);
+  assert.match(st.manifestError, /workflows must be an array/);
+  eq(st.vibeMode, "no skill-router checkout");
+  const text = inst.printStatus(st);
+  assert.match(text, /workflows: error/);
+  assert.match(text, /vibe orchestrator mode: no skill-router checkout/);
+  clean(root); clean(skillsHome); clean(claudeHome);
+});
+
+test("statusOf reports a partially-installed runner as incomplete", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  w(skillsHome, "run-workflow/SKILL.md", OWNED());
+  const st = inst.statusOf(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(st.piRunner, "incomplete");
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("runCli dispatches install/update/status and rejects unknown modes or a custom root without explicit homes", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  const paths = { skillsHome, claudeSkillsHome: claudeHome, vibeRoot };
+  eq(inst.runCli(["install"], {}, { root, ...paths }).exitCode, 0);
+  eq(inst.runCli(["update"], {}, { root, ...paths }).exitCode, 0);
+  const st = inst.runCli(["status"], {}, { root, ...paths });
+  eq(st.exitCode, 0);
+  assert(st.out.some(l => /workflows: 1/.test(l)));
+  const bad = inst.runCli(["frobnicate"], {}, { root, ...paths });
+  eq(bad.exitCode, 1);
+  assert.match(bad.err.join("\n"), /usage/);
+  const guard = inst.runCli(["install"], {}, { root });
+  eq(guard.exitCode, 1);
+  assert.match(guard.err.join("\n"), /explicit/);
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
 // --- repo-root fixtures: the committed workflows.json validates against the committed agents.json ---
 
 test("committed workflows.json validates against committed agents.json", () => {

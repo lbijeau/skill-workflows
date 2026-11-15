@@ -8,6 +8,12 @@ export const GLOBAL_SKILL_MARKER = "overwritten by skill-workflows install/updat
 
 export const GLOBAL_SKILL_HEADER = "<!-- Generated-style boilerplate; " + GLOBAL_SKILL_MARKER;
 
+// The predecessor: skill-router shipped the run-workflow skills before the
+// ADR-011 extraction, with its own boilerplate marker at the same paths.
+// Those files are install-owned (not user-authored): this repo's installer
+// takes them over — same paths, same names, no stale double-install.
+export const PREDECESSOR_SKILL_HEADER = "<!-- Generated-style boilerplate; overwritten by skill-router install/update";
+
 export function isSymlink(p) {
   try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; }
 }
@@ -20,7 +26,8 @@ function isOwnedSkillContent(content) {
   const end = lines.indexOf("---", 1);
   if (end < 0) return false;
   const first = lines.slice(end + 1).find(l => l.trim() !== "");
-  return first !== undefined && first.startsWith(GLOBAL_SKILL_HEADER);
+  return first !== undefined
+    && (first.startsWith(GLOBAL_SKILL_HEADER) || first.startsWith(PREDECESSOR_SKILL_HEADER));
 }
 
 // "absent" | "current" | "outdated" | "refused". Never overwrites a user's own
