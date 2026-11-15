@@ -20,7 +20,7 @@ The user names a workflow (or asks to list them). Run it as follows:
    passing the step's `task` text and telling it to write the
    step's `output` file. If the named agent is not installed, report
    that and stop — do not guess a substitute.
-4. After each step: verify the output file exists and is non-empty. If
+4. After each step: verify the output file exists and is non-empty (if the step's output path contains a placeholder like FEATURE, substitute the actual feature name before verifying). If
    it is not, report the failed step and stop — earlier outputs stay
    untouched.
 5. **Checkpoint:** after every step, report the output file to the user
