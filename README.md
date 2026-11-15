@@ -42,8 +42,36 @@ Requires Node ≥ 18. No dependencies.
 3. Print a report; a malformed `workflows.json` is a printed warning,
    never a failed install.
 
+The installed `workflows.json`/`agents.json` copies carry a top-level
+`"_generated": "skill-workflows"` provenance key (the loaders ignore unknown
+top-level keys). The sync prunes an installed copy **only when the key is
+present**: remove the key from your installed copy and it is yours — the
+prune leaves it alone. A hand-edited copy that still carries the key is
+accepted loss on a bad repo manifest.
+
 `status` is read-only: workflows count, registry count, runner presence
 per harness, Vibe mode presence, and manifest validity.
+
+## `check` — registry drift check
+
+`./install.sh check` verifies each `agents.json` entry: every present path
+field must point at an existing file (tilde-expanded), and where the file
+exists its frontmatter `name:` must match the registry entry. Per agent it
+reports `ok`, `missing path: <path>` (warning — the paths are provenance
+docs), or `drift: registry "X" but file says "Y"`. A rename in a source
+repo surfaces here, at check time, not just at dispatch. Exit is non-zero
+only on drift.
+
+## `uninstall`
+
+`./install.sh uninstall` removes what skill-workflows owns and nothing
+else: the installed `run-workflow` skill dirs (`~/.pi/agent/skills/`,
+`~/.claude/skills/`) only if their SKILL.md carries this repo's generated
+marker, and the Vibe `workflow-orchestrator.toml` only if it carries this
+repo's marker. User-authored files — and files still carrying the
+skill-router predecessor's marker, which this repo never installed over —
+are refused and reported, never deleted. Each removal or refusal is
+printed.
 
 Install never clobbers a user-authored file at a destination path: files
 without a generated-boilerplate marker (this repo's or its skill-router

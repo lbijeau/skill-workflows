@@ -261,8 +261,12 @@ test("syncGlobalSkills copies workflows.json AND agents.json beside the installe
   const r = sync.syncGlobalSkills(root, skillsHome);
   eq(r.written.filter(f => f.includes("run-workflow")).length, 1);
   const [wfJson, regJson] = rwFiles(skillsHome);
-  eq(fs.readFileSync(wfJson, "utf8"), EMPTY_MANIFEST);
-  eq(fs.readFileSync(regJson, "utf8"), JSON.stringify({ agents: [] }));
+  const wfParsed = JSON.parse(fs.readFileSync(wfJson, "utf8"));
+  const regParsed = JSON.parse(fs.readFileSync(regJson, "utf8"));
+  eq(wfParsed[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE);
+  eq(wfParsed.workflows.length, 0); // EMPTY_MANIFEST
+  eq(regParsed[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE);
+  eq(regParsed.agents.length, 0);
   clean(root); clean(skillsHome);
 });
 
@@ -354,8 +358,8 @@ test("syncClaudeSkills copies workflows.json AND agents.json beside the installe
   const r = sync.syncClaudeSkills(root, home);
   eq(r.written.includes("run-workflow"), true);
   const [wfJson, regJson] = rwFiles(home);
-  eq(fs.readFileSync(wfJson, "utf8"), EMPTY_MANIFEST);
-  eq(fs.readFileSync(regJson, "utf8"), JSON.stringify({ agents: [] }));
+  eq(JSON.parse(fs.readFileSync(wfJson, "utf8")).workflows.length, 0);
+  eq(Array.isArray(JSON.parse(fs.readFileSync(regJson, "utf8")).agents), true);
   clean(root); clean(path.dirname(home));
 });
 
@@ -424,10 +428,14 @@ test("committed skills sync byte-identically with both committed JSON files", ()
     fn(REPO_ROOT, home);
     eq(fs.readFileSync(path.join(home, "run-workflow", "SKILL.md"), "utf8"),
       fs.readFileSync(path.join(REPO_ROOT, srcDir, "run-workflow", "SKILL.md"), "utf8"));
-    eq(fs.readFileSync(path.join(home, "run-workflow", "workflows.json"), "utf8"),
-      fs.readFileSync(path.join(REPO_ROOT, "workflows.json"), "utf8"));
-    eq(fs.readFileSync(path.join(home, "run-workflow", "agents.json"), "utf8"),
-      fs.readFileSync(path.join(REPO_ROOT, "agents.json"), "utf8"));
+    // The JSON copies differ from the repo files only by the provenance key.
+    for (const f of ["workflows.json", "agents.json"]) {
+      const copy = JSON.parse(fs.readFileSync(path.join(home, "run-workflow", f), "utf8"));
+      const repo = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, f), "utf8"));
+      eq(copy[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE);
+      delete copy[sync.PROVENANCE_KEY];
+      assert.deepEqual(copy, repo, f);
+    }
     clean(path.dirname(home));
   }
 });
@@ -568,7 +576,10 @@ test("runInstall syncs the pi and Claude runners to the given homes and writes t
     assert(fs.existsSync(path.join(skillsHome, "run-workflow", f)), `pi missing ${f}`);
     assert(fs.existsSync(path.join(claudeHome, "run-workflow", f)), `claude missing ${f}`);
   }
-  assert(fs.readFileSync(path.join(skillsHome, "run-workflow", "workflows.json"), "utf8") === ONE_WF);
+  const wfCopy = JSON.parse(fs.readFileSync(path.join(skillsHome, "run-workflow", "workflows.json"), "utf8"));
+  eq(wfCopy[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE);
+  delete wfCopy[sync.PROVENANCE_KEY];
+  assert.deepEqual(wfCopy, JSON.parse(ONE_WF));
   const toml = fs.readFileSync(path.join(vibeRoot, "agents-vibe", "workflow-orchestrator.toml"), "utf8");
   assert(toml.startsWith(gen.GENERATED_MARKER));
   clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
@@ -655,6 +666,163 @@ test("runCli dispatches install/update/status and rejects unknown modes or a cus
   eq(guard.exitCode, 1);
   assert.match(guard.err.join("\n"), /explicit/);
   clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+// --- provenance-guarded JSON copies (workflows.json / agents.json) ---
+
+test("installed JSON copies carry the _generated provenance key; the repo files do not", () => {
+  const root = syncRoot({ agents: [A()], manifest: JSON.stringify({ workflows: [
+    { name: "review", description: "d", steps: [ { agent: "a", task: "t", output: "docs/o.md" } ] } ] }) });
+  const skillsHome = tmp();
+  sync.syncGlobalSkills(root, skillsHome);
+  for (const f of rwFiles(skillsHome)) {
+    const parsed = JSON.parse(fs.readFileSync(f, "utf8"));
+    eq(parsed[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE, f);
+  }
+  // the repo files themselves stay untouched — no key baked into the manifest
+  eq(JSON.parse(fs.readFileSync(path.join(root, "workflows.json"), "utf8"))[sync.PROVENANCE_KEY], undefined);
+  eq(JSON.parse(fs.readFileSync(path.join(root, "agents.json"), "utf8"))[sync.PROVENANCE_KEY], undefined);
+  clean(root); clean(skillsHome);
+});
+
+test("prune removes a provenance-marked installed copy when the manifest goes bad", () => {
+  const root = syncRoot(); const skillsHome = tmp();
+  sync.syncGlobalSkills(root, skillsHome); // writes marked copies
+  w(root, "workflows.json", BAD_MANIFEST);
+  sync.syncGlobalSkills(root, skillsHome);
+  for (const f of rwFiles(skillsHome)) eq(fs.existsSync(f), false, f);
+  clean(root); clean(skillsHome);
+});
+
+test("prune leaves an unmarked copy (user-owned) when the manifest goes bad", () => {
+  for (const fn of [sync.syncGlobalSkills, sync.syncClaudeSkills]) {
+    const claude = fn === sync.syncClaudeSkills;
+    const root = syncRoot({ claude }); const home = tmp();
+    fn(root, home);
+    const [wfJson] = rwFiles(home);
+    const parsed = JSON.parse(fs.readFileSync(wfJson, "utf8"));
+    delete parsed[sync.PROVENANCE_KEY];           // user removed the key: theirs now
+    fs.writeFileSync(wfJson, JSON.stringify(parsed));
+    w(root, "workflows.json", BAD_MANIFEST);
+    const r = fn(root, home);
+    eq(fs.existsSync(wfJson), true, "unmarked copy must survive the prune");
+    assert(r.keptCopies.some(f => f === wfJson), "refusal must be reported");
+    clean(root); clean(home);
+  }
+});
+
+test("loadRegistry and loadWorkflows tolerate the _generated provenance key", () => {
+  const root = tmp();
+  w(root, "agents.json", JSON.stringify({ _generated: "skill-workflows", agents: [A()] }));
+  eq(wf.loadRegistry(root).agents.length, 1);
+  w(root, "workflows.json", JSON.stringify({ _generated: "skill-workflows", workflows: [
+    { name: "review", description: "d", steps: [ { agent: "a", task: "t", output: "docs/o.md" } ] } ] }));
+  eq(wf.loadWorkflows(root).workflows.length, 1);
+  clean(root);
+});
+
+// --- uninstall: removes only what skill-workflows owns ---
+
+test("runUninstall removes owned runner dirs and the marked Vibe TOML, reports each", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  inst.runInstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  const r = inst.runUninstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(r.exitCode, 0);
+  eq(fs.existsSync(path.join(skillsHome, "run-workflow")), false);
+  eq(fs.existsSync(path.join(claudeHome, "run-workflow")), false);
+  eq(fs.existsSync(path.join(vibeRoot, "agents-vibe", "workflow-orchestrator.toml")), false);
+  assert(r.report.some(l => /pi run-workflow: removed/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /claude run-workflow: removed/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /vibe orchestrator mode: removed/.test(l)), r.report.join("\n"));
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("runUninstall refuses user-authored and predecessor-marked dirs, never deletes them", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  w(skillsHome, "run-workflow/SKILL.md", "my own skill\n");
+  w(claudeHome, "run-workflow/SKILL.md",
+    `---\nname: run-workflow\ndescription: d\n---\n<!-- Generated-style boilerplate; overwritten by skill-router install/update -->\nold\n`);
+  w(vibeRoot, "agents-vibe/workflow-orchestrator.toml", "hand-written, no marker\n");
+  const r = inst.runUninstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(r.exitCode, 0);
+  eq(fs.readFileSync(path.join(skillsHome, "run-workflow", "SKILL.md"), "utf8"), "my own skill\n");
+  assert(fs.existsSync(path.join(claudeHome, "run-workflow", "SKILL.md")));
+  eq(fs.readFileSync(path.join(vibeRoot, "agents-vibe", "workflow-orchestrator.toml"), "utf8"), "hand-written, no marker\n");
+  assert(r.report.some(l => /pi run-workflow: refused/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /claude run-workflow: refused/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /vibe orchestrator mode: refused/.test(l)), r.report.join("\n"));
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("runUninstall reports absent artifacts without error", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  const r = inst.runUninstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(r.exitCode, 0);
+  assert(r.report.some(l => /pi run-workflow: not installed/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /vibe orchestrator mode: absent/.test(l)), r.report.join("\n"));
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("runCli dispatches uninstall", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  const paths = { skillsHome, claudeSkillsHome: claudeHome, vibeRoot };
+  inst.runCli(["install"], {}, { root, ...paths });
+  const r = inst.runCli(["uninstall"], {}, { root, ...paths });
+  eq(r.exitCode, 0);
+  eq(fs.existsSync(path.join(skillsHome, "run-workflow")), false);
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+// --- check: registry drift check (paths exist, frontmatter names match) ---
+
+test("checkRegistry reports ok, missing paths and drift; drift is the only failure", () => {
+  const home = tmp();
+  w(home, "agents/a.md", "---\nname: a\ndescription: d\n---\nbody\n");
+  w(home, "agents/renamed.md", "---\nname: new-name\ndescription: d\n---\nbody\n");
+  const root = regRoot([
+    { name: "a", description: "agent a", pi: "~/agents/a.md" },
+    { name: "b", description: "agent b", pi: "~/agents/missing.md" },
+    { name: "c", description: "agent c", pi: "~/agents/renamed.md" },
+  ]);
+  const r = inst.checkRegistry(root, home);
+  eq(r.results.length, 3);
+  const byName = Object.fromEntries(r.results.map(x => [x.name, x]));
+  eq(byName.a.status, "ok");
+  eq(byName.b.status, "missing");
+  assert(/missing path: ~\/agents\/missing\.md/.test(byName.b.lines[0]), byName.b.lines[0]);
+  eq(byName.c.status, "drift");
+  assert(/drift: registry "c" but file says "new-name"/.test(byName.c.lines[0]), byName.c.lines[0]);
+  eq(r.driftCount, 1);
+  clean(root); clean(home);
+});
+
+test("checkRegistry: exit non-zero only on drift, not on missing paths", () => {
+  const home = tmp();
+  const root1 = regRoot([{ name: "a", description: "agent a", pi: "~/agents/gone.md" }]);
+  eq(inst.checkRegistry(root1, home).driftCount, 0);
+  const root2 = regRoot([{ name: "a", description: "agent a", pi: "~/agents/a.md" }]);
+  w(home, "agents/a.md", "---\nname: zzz\n---\nbody\n");
+  eq(inst.checkRegistry(root2, home).driftCount, 1);
+  clean(root1); clean(root2); clean(home);
+});
+
+test("runCli check prints per-agent lines and exits 1 only on drift", () => {
+  const home = tmp();
+  w(home, "agents/a.md", "---\nname: a\n---\nbody\n");
+  const okRoot = regRoot([{ name: "a", description: "agent a", pi: "~/agents/a.md" }]);
+  const ok = inst.runCli(["check"], {}, { root: okRoot, home });
+  eq(ok.exitCode, 0);
+  assert(ok.out.some(l => /a: ok/.test(l)), ok.out.join("\n"));
+  const driftRoot = regRoot([{ name: "a", description: "agent a", pi: "~/agents/a.md" }]);
+  w(home, "agents/a.md", "---\nname: b\n---\nbody\n");
+  const bad = inst.runCli(["check"], {}, { root: driftRoot, home });
+  eq(bad.exitCode, 1);
+  assert(bad.out.some(l => /drift: registry "a" but file says "b"/.test(l)), bad.out.join("\n"));
+  clean(okRoot); clean(driftRoot); clean(home);
 });
 
 // --- repo-root fixtures: the committed workflows.json validates against the committed agents.json ---

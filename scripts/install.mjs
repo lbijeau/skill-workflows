@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { manifestState, loadRegistry } from "./workflows.mjs";
-import { syncGlobalSkills, syncClaudeSkills, GLOBAL_SKILL_HEADER } from "./sync.mjs";
+import { syncGlobalSkills, syncClaudeSkills, GLOBAL_SKILL_HEADER, PROVENANCE_KEY, PROVENANCE_VALUE } from "./sync.mjs";
 import { writeVibeOrchestrator, GENERATED_MARKER, VIBE_ORCHESTRATOR_NAME } from "./generate.mjs";
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -63,6 +63,63 @@ function runFlow(root, paths) {
 export function runInstall(root, paths = {}) { return runFlow(root, paths); }
 export function runUpdate(root, paths = {}) { return runFlow(root, paths); }
 
+// Uninstall removes only what skill-workflows owns and nothing else:
+// the run-workflow skill dirs (both harness homes) only when their SKILL.md
+// carries this repo's generated-boilerplate marker, and the Vibe TOML only
+// when it carries this repo's generated marker. User-authored files — and
+// files still carrying the skill-router predecessor's marker, which this
+// repo never installed over — are refused and reported, never deleted.
+export function runUninstall(root, paths = {}) {
+  const { skillsHome, claudeSkillsHome, vibeRoot } = flowPaths(paths);
+  const report = [];
+  for (const [label, home] of [["pi", skillsHome], ["claude", claudeSkillsHome]]) {
+    const dir = path.join(home, "run-workflow");
+    const skill = path.join(dir, "SKILL.md");
+    if (!fs.existsSync(skill)) {
+      report.push(`${label} run-workflow: not installed`);
+      continue;
+    }
+    let owned = false;
+    try {
+      // Strictly this repo's marker — NOT the predecessor's. A file still
+      // carrying skill-router's marker was never installed over by this
+      // repo, so it is not this repo's to remove.
+      const lines = fs.readFileSync(skill, "utf8").split("\n");
+      const end = lines[0] === "---" ? lines.indexOf("---", 1) : -1;
+      const first = end > 0 ? lines.slice(end + 1).find(l => l.trim() !== "") : undefined;
+      owned = !isSymlink(dir) && !isSymlink(skill)
+        && first !== undefined && first.startsWith(GLOBAL_SKILL_HEADER);
+    } catch { owned = false; }
+    if (!owned) {
+      report.push(`${label} run-workflow: refused (user-authored or predecessor-marked, left alone)`);
+      continue;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    report.push(`${label} run-workflow: removed ${dir}`);
+  }
+  const toml = path.join(vibeRoot, "agents-vibe", `${VIBE_ORCHESTRATOR_NAME}.toml`);
+  if (!fs.existsSync(toml)) {
+    report.push("vibe orchestrator mode: absent");
+  } else {
+    let marked = false;
+    try {
+      marked = !isSymlink(toml) && fs.readFileSync(toml, "utf8").split("\n", 5).join("\n").includes(GENERATED_MARKER);
+    } catch { marked = false; }
+    if (marked) {
+      fs.rmSync(toml);
+      report.push(`vibe orchestrator mode: removed ${toml}`);
+    } else {
+      report.push("vibe orchestrator mode: refused (user-authored, left alone)");
+    }
+  }
+  report.push("reminder: run /reload (or restart your agent) to drop the removed skills");
+  return { exitCode: 0, report };
+}
+
+function isSymlink(p) {
+  try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; }
+}
+
 // Read-only: is the run-workflow skill (with its sibling manifest + registry
 // copies) present at the given skills home? "installed" | "incomplete" |
 // "missing" | "refused" (a user-owned file install will not touch).
@@ -78,9 +135,15 @@ function runnerState(root, skillsHome) {
   if (!copies) return "incomplete";
   const state = manifestState(root);
   if (!state.valid) return "incomplete";
-  const expected = f => fs.readFileSync(path.join(root, f), "utf8");
+  // The installed copies carry the _generated provenance key; compare them
+  // to the repo files modulo that key.
   const inSync = ["workflows.json", "agents.json"].every(f => {
-    try { return fs.readFileSync(path.join(dir, f), "utf8") === expected(f); } catch { return false; }
+    try {
+      const copy = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+      const repo = JSON.parse(fs.readFileSync(path.join(root, f), "utf8"));
+      return copy[PROVENANCE_KEY] === PROVENANCE_VALUE
+        && (delete copy[PROVENANCE_KEY], JSON.stringify(copy) === JSON.stringify(repo));
+    } catch { return false; }
   });
   return inSync ? "installed" : "stale";
 }
@@ -116,6 +179,67 @@ export function statusOf(root, paths = {}) {
   };
 }
 
+// Frontmatter `name:` of a markdown agent file, or undefined when the file
+// has no frontmatter or no name field.
+function frontmatterName(file) {
+  let content;
+  try { content = fs.readFileSync(file, "utf8"); } catch { return undefined; }
+  const lines = content.split("\n");
+  if (lines[0] !== "---") return undefined;
+  const end = lines.indexOf("---", 1);
+  if (end < 0) return undefined;
+  for (const line of lines.slice(1, end)) {
+    const m = line.match(/^name:\s*(\S+)\s*$/);
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
+// Registry drift check: for every agents.json entry, verify each present path
+// field points at an existing file (tilde-expanded) and — where the file
+// exists — that its frontmatter `name:` matches the registry entry. A rename
+// in the source repo surfaces here, not just at dispatch. Missing paths are
+// warnings (the fields are provenance docs); drift is the real signal and the
+// only non-zero exit. A file with no frontmatter name is a warning, not drift.
+export function checkRegistry(root, home = os.homedir()) {
+  const { agents } = loadRegistry(root);
+  const results = agents.map((entry) => {
+    const lines = [];
+    let drift = false;
+    let missing = false;
+    for (const field of ["pi", "claude", "vibe"]) {
+      const p = entry?.[field];
+      if (typeof p !== "string" || p === "") continue;
+      const abs = p.startsWith("~/") ? path.join(home, p.slice(2)) : p;
+      if (!fs.existsSync(abs)) {
+        lines.push(`${field}: missing path: ${p}`);
+        missing = true;
+        continue;
+      }
+      const fmName = frontmatterName(abs);
+      if (fmName === undefined) {
+        lines.push(`${field}: no frontmatter name: ${p}`);
+        continue;
+      }
+      if (fmName !== entry.name) {
+        lines.push(`${field}: drift: registry "${entry.name}" but file says "${fmName}"`);
+        drift = true;
+      }
+    }
+    const status = drift ? "drift" : missing ? "missing" : "ok";
+    return { name: entry.name, status, lines, drift };
+  });
+  const driftCount = results.filter(r => r.drift).length;
+  return { results, driftCount };
+}
+
+export function printCheck(chk) {
+  const lines = chk.results.map(r =>
+    r.status === "ok" ? `${r.name}: ok` : `${r.name}: ${r.lines.join("; ")}`);
+  if (chk.driftCount > 0) lines.push(`${chk.driftCount} agent(s) drifted`);
+  return lines.join("\n");
+}
+
 export function printStatus(st) {
   const lines = [
     `workflows: ${st.manifestValid ? st.workflows : `error (${st.manifestError})`}`,
@@ -140,13 +264,18 @@ export function runCli(argv, env, opts = {}) {
       out.push(printStatus(statusOf(root, paths)));
       return { exitCode: 0, out, err };
     }
-    if (cmd === "install" || cmd === "update") {
+    if (cmd === "check") {
+      const chk = checkRegistry(root, opts.home);
+      out.push(printCheck(chk));
+      return { exitCode: chk.driftCount > 0 ? 1 : 0, out, err };
+    }
+    if (cmd === "install" || cmd === "update" || cmd === "uninstall") {
       // A custom root (tests) must not fall back to the real user homes.
       if (custom && !(paths.skillsHome && paths.claudeSkillsHome && paths.vibeRoot !== undefined)) {
         err.push("runCli: a custom root needs explicit skillsHome, claudeSkillsHome and vibeRoot (it would otherwise write the real user homes)");
         return { exitCode: 1, out, err };
       }
-      const run = cmd === "install" ? runInstall : runUpdate;
+      const run = cmd === "install" ? runInstall : cmd === "update" ? runUpdate : runUninstall;
       const r = run(root, paths);
       out.push(...r.report);
       return { exitCode: r.exitCode, out, err };
@@ -155,7 +284,7 @@ export function runCli(argv, env, opts = {}) {
     err.push(e.message);
     return { exitCode: 1, out, err };
   }
-  err.push("usage: install.mjs <install|update|status>");
+  err.push("usage: install.mjs <install|update|uninstall|status|check>");
   return { exitCode: 1, out, err };
 }
 
