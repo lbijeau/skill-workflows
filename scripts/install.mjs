@@ -63,6 +63,63 @@ function runFlow(root, paths) {
 export function runInstall(root, paths = {}) { return runFlow(root, paths); }
 export function runUpdate(root, paths = {}) { return runFlow(root, paths); }
 
+// Uninstall removes only what skill-workflows owns and nothing else:
+// the run-workflow skill dirs (both harness homes) only when their SKILL.md
+// carries this repo's generated-boilerplate marker, and the Vibe TOML only
+// when it carries this repo's generated marker. User-authored files — and
+// files still carrying the skill-router predecessor's marker, which this
+// repo never installed over — are refused and reported, never deleted.
+export function runUninstall(root, paths = {}) {
+  const { skillsHome, claudeSkillsHome, vibeRoot } = flowPaths(paths);
+  const report = [];
+  for (const [label, home] of [["pi", skillsHome], ["claude", claudeSkillsHome]]) {
+    const dir = path.join(home, "run-workflow");
+    const skill = path.join(dir, "SKILL.md");
+    if (!fs.existsSync(skill)) {
+      report.push(`${label} run-workflow: not installed`);
+      continue;
+    }
+    let owned = false;
+    try {
+      // Strictly this repo's marker — NOT the predecessor's. A file still
+      // carrying skill-router's marker was never installed over by this
+      // repo, so it is not this repo's to remove.
+      const lines = fs.readFileSync(skill, "utf8").split("\n");
+      const end = lines[0] === "---" ? lines.indexOf("---", 1) : -1;
+      const first = end > 0 ? lines.slice(end + 1).find(l => l.trim() !== "") : undefined;
+      owned = !isSymlink(dir) && !isSymlink(skill)
+        && first !== undefined && first.startsWith(GLOBAL_SKILL_HEADER);
+    } catch { owned = false; }
+    if (!owned) {
+      report.push(`${label} run-workflow: refused (user-authored or predecessor-marked, left alone)`);
+      continue;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    report.push(`${label} run-workflow: removed ${dir}`);
+  }
+  const toml = path.join(vibeRoot, "agents-vibe", `${VIBE_ORCHESTRATOR_NAME}.toml`);
+  if (!fs.existsSync(toml)) {
+    report.push("vibe orchestrator mode: absent");
+  } else {
+    let marked = false;
+    try {
+      marked = !isSymlink(toml) && fs.readFileSync(toml, "utf8").split("\n", 5).join("\n").includes(GENERATED_MARKER);
+    } catch { marked = false; }
+    if (marked) {
+      fs.rmSync(toml);
+      report.push(`vibe orchestrator mode: removed ${toml}`);
+    } else {
+      report.push("vibe orchestrator mode: refused (user-authored, left alone)");
+    }
+  }
+  report.push("reminder: run /reload (or restart your agent) to drop the removed skills");
+  return { exitCode: 0, report };
+}
+
+function isSymlink(p) {
+  try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; }
+}
+
 // Read-only: is the run-workflow skill (with its sibling manifest + registry
 // copies) present at the given skills home? "installed" | "incomplete" |
 // "missing" | "refused" (a user-owned file install will not touch).
@@ -206,13 +263,13 @@ export function runCli(argv, env, opts = {}) {
       out.push(printCheck(chk));
       return { exitCode: chk.driftCount > 0 ? 1 : 0, out, err };
     }
-    if (cmd === "install" || cmd === "update") {
+    if (cmd === "install" || cmd === "update" || cmd === "uninstall") {
       // A custom root (tests) must not fall back to the real user homes.
       if (custom && !(paths.skillsHome && paths.claudeSkillsHome && paths.vibeRoot !== undefined)) {
         err.push("runCli: a custom root needs explicit skillsHome, claudeSkillsHome and vibeRoot (it would otherwise write the real user homes)");
         return { exitCode: 1, out, err };
       }
-      const run = cmd === "install" ? runInstall : runUpdate;
+      const run = cmd === "install" ? runInstall : cmd === "update" ? runUpdate : runUninstall;
       const r = run(root, paths);
       out.push(...r.report);
       return { exitCode: r.exitCode, out, err };

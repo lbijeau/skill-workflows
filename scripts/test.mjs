@@ -657,6 +657,62 @@ test("runCli dispatches install/update/status and rejects unknown modes or a cus
   clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
 });
 
+// --- uninstall: removes only what skill-workflows owns ---
+
+test("runUninstall removes owned runner dirs and the marked Vibe TOML, reports each", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  inst.runInstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  const r = inst.runUninstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(r.exitCode, 0);
+  eq(fs.existsSync(path.join(skillsHome, "run-workflow")), false);
+  eq(fs.existsSync(path.join(claudeHome, "run-workflow")), false);
+  eq(fs.existsSync(path.join(vibeRoot, "agents-vibe", "workflow-orchestrator.toml")), false);
+  assert(r.report.some(l => /pi run-workflow: removed/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /claude run-workflow: removed/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /vibe orchestrator mode: removed/.test(l)), r.report.join("\n"));
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("runUninstall refuses user-authored and predecessor-marked dirs, never deletes them", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  w(skillsHome, "run-workflow/SKILL.md", "my own skill\n");
+  w(claudeHome, "run-workflow/SKILL.md",
+    `---\nname: run-workflow\ndescription: d\n---\n<!-- Generated-style boilerplate; overwritten by skill-router install/update -->\nold\n`);
+  w(vibeRoot, "agents-vibe/workflow-orchestrator.toml", "hand-written, no marker\n");
+  const r = inst.runUninstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(r.exitCode, 0);
+  eq(fs.readFileSync(path.join(skillsHome, "run-workflow", "SKILL.md"), "utf8"), "my own skill\n");
+  assert(fs.existsSync(path.join(claudeHome, "run-workflow", "SKILL.md")));
+  eq(fs.readFileSync(path.join(vibeRoot, "agents-vibe", "workflow-orchestrator.toml"), "utf8"), "hand-written, no marker\n");
+  assert(r.report.some(l => /pi run-workflow: refused/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /claude run-workflow: refused/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /vibe orchestrator mode: refused/.test(l)), r.report.join("\n"));
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("runUninstall reports absent artifacts without error", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  const r = inst.runUninstall(root, { skillsHome, claudeSkillsHome: claudeHome, vibeRoot });
+  eq(r.exitCode, 0);
+  assert(r.report.some(l => /pi run-workflow: not installed/.test(l)), r.report.join("\n"));
+  assert(r.report.some(l => /vibe orchestrator mode: absent/.test(l)), r.report.join("\n"));
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+test("runCli dispatches uninstall", () => {
+  const root = installRoot();
+  const skillsHome = tmp(); const claudeHome = tmp(); const vibeRoot = tmp();
+  const paths = { skillsHome, claudeSkillsHome: claudeHome, vibeRoot };
+  inst.runCli(["install"], {}, { root, ...paths });
+  const r = inst.runCli(["uninstall"], {}, { root, ...paths });
+  eq(r.exitCode, 0);
+  eq(fs.existsSync(path.join(skillsHome, "run-workflow")), false);
+  clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
 // --- check: registry drift check (paths exist, frontmatter names match) ---
 
 test("checkRegistry reports ok, missing paths and drift; drift is the only failure", () => {
