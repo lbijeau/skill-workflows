@@ -657,6 +657,54 @@ test("runCli dispatches install/update/status and rejects unknown modes or a cus
   clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
 });
 
+// --- check: registry drift check (paths exist, frontmatter names match) ---
+
+test("checkRegistry reports ok, missing paths and drift; drift is the only failure", () => {
+  const home = tmp();
+  w(home, "agents/a.md", "---\nname: a\ndescription: d\n---\nbody\n");
+  w(home, "agents/renamed.md", "---\nname: new-name\ndescription: d\n---\nbody\n");
+  const root = regRoot([
+    { name: "a", description: "agent a", pi: "~/agents/a.md" },
+    { name: "b", description: "agent b", pi: "~/agents/missing.md" },
+    { name: "c", description: "agent c", pi: "~/agents/renamed.md" },
+  ]);
+  const r = inst.checkRegistry(root, home);
+  eq(r.results.length, 3);
+  const byName = Object.fromEntries(r.results.map(x => [x.name, x]));
+  eq(byName.a.status, "ok");
+  eq(byName.b.status, "missing");
+  assert(/missing path: ~\/agents\/missing\.md/.test(byName.b.lines[0]), byName.b.lines[0]);
+  eq(byName.c.status, "drift");
+  assert(/drift: registry "c" but file says "new-name"/.test(byName.c.lines[0]), byName.c.lines[0]);
+  eq(r.driftCount, 1);
+  clean(root); clean(home);
+});
+
+test("checkRegistry: exit non-zero only on drift, not on missing paths", () => {
+  const home = tmp();
+  const root1 = regRoot([{ name: "a", description: "agent a", pi: "~/agents/gone.md" }]);
+  eq(inst.checkRegistry(root1, home).driftCount, 0);
+  const root2 = regRoot([{ name: "a", description: "agent a", pi: "~/agents/a.md" }]);
+  w(home, "agents/a.md", "---\nname: zzz\n---\nbody\n");
+  eq(inst.checkRegistry(root2, home).driftCount, 1);
+  clean(root1); clean(root2); clean(home);
+});
+
+test("runCli check prints per-agent lines and exits 1 only on drift", () => {
+  const home = tmp();
+  w(home, "agents/a.md", "---\nname: a\n---\nbody\n");
+  const okRoot = regRoot([{ name: "a", description: "agent a", pi: "~/agents/a.md" }]);
+  const ok = inst.runCli(["check"], {}, { root: okRoot, home });
+  eq(ok.exitCode, 0);
+  assert(ok.out.some(l => /a: ok/.test(l)), ok.out.join("\n"));
+  const driftRoot = regRoot([{ name: "a", description: "agent a", pi: "~/agents/a.md" }]);
+  w(home, "agents/a.md", "---\nname: b\n---\nbody\n");
+  const bad = inst.runCli(["check"], {}, { root: driftRoot, home });
+  eq(bad.exitCode, 1);
+  assert(bad.out.some(l => /drift: registry "a" but file says "b"/.test(l)), bad.out.join("\n"));
+  clean(okRoot); clean(driftRoot); clean(home);
+});
+
 // --- repo-root fixtures: the committed workflows.json validates against the committed agents.json ---
 
 test("committed workflows.json validates against committed agents.json", () => {

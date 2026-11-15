@@ -116,6 +116,67 @@ export function statusOf(root, paths = {}) {
   };
 }
 
+// Frontmatter `name:` of a markdown agent file, or undefined when the file
+// has no frontmatter or no name field.
+function frontmatterName(file) {
+  let content;
+  try { content = fs.readFileSync(file, "utf8"); } catch { return undefined; }
+  const lines = content.split("\n");
+  if (lines[0] !== "---") return undefined;
+  const end = lines.indexOf("---", 1);
+  if (end < 0) return undefined;
+  for (const line of lines.slice(1, end)) {
+    const m = line.match(/^name:\s*(\S+)\s*$/);
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
+// Registry drift check: for every agents.json entry, verify each present path
+// field points at an existing file (tilde-expanded) and — where the file
+// exists — that its frontmatter `name:` matches the registry entry. A rename
+// in the source repo surfaces here, not just at dispatch. Missing paths are
+// warnings (the fields are provenance docs); drift is the real signal and the
+// only non-zero exit. A file with no frontmatter name is a warning, not drift.
+export function checkRegistry(root, home = os.homedir()) {
+  const { agents } = loadRegistry(root);
+  const results = agents.map((entry) => {
+    const lines = [];
+    let drift = false;
+    let missing = false;
+    for (const field of ["pi", "claude", "vibe"]) {
+      const p = entry?.[field];
+      if (typeof p !== "string" || p === "") continue;
+      const abs = p.startsWith("~/") ? path.join(home, p.slice(2)) : p;
+      if (!fs.existsSync(abs)) {
+        lines.push(`${field}: missing path: ${p}`);
+        missing = true;
+        continue;
+      }
+      const fmName = frontmatterName(abs);
+      if (fmName === undefined) {
+        lines.push(`${field}: no frontmatter name: ${p}`);
+        continue;
+      }
+      if (fmName !== entry.name) {
+        lines.push(`${field}: drift: registry "${entry.name}" but file says "${fmName}"`);
+        drift = true;
+      }
+    }
+    const status = drift ? "drift" : missing ? "missing" : "ok";
+    return { name: entry.name, status, lines, drift };
+  });
+  const driftCount = results.filter(r => r.drift).length;
+  return { results, driftCount };
+}
+
+export function printCheck(chk) {
+  const lines = chk.results.map(r =>
+    r.status === "ok" ? `${r.name}: ok` : `${r.name}: ${r.lines.join("; ")}`);
+  if (chk.driftCount > 0) lines.push(`${chk.driftCount} agent(s) drifted`);
+  return lines.join("\n");
+}
+
 export function printStatus(st) {
   const lines = [
     `workflows: ${st.manifestValid ? st.workflows : `error (${st.manifestError})`}`,
@@ -140,6 +201,11 @@ export function runCli(argv, env, opts = {}) {
       out.push(printStatus(statusOf(root, paths)));
       return { exitCode: 0, out, err };
     }
+    if (cmd === "check") {
+      const chk = checkRegistry(root, opts.home);
+      out.push(printCheck(chk));
+      return { exitCode: chk.driftCount > 0 ? 1 : 0, out, err };
+    }
     if (cmd === "install" || cmd === "update") {
       // A custom root (tests) must not fall back to the real user homes.
       if (custom && !(paths.skillsHome && paths.claudeSkillsHome && paths.vibeRoot !== undefined)) {
@@ -155,7 +221,7 @@ export function runCli(argv, env, opts = {}) {
     err.push(e.message);
     return { exitCode: 1, out, err };
   }
-  err.push("usage: install.mjs <install|update|status>");
+  err.push("usage: install.mjs <install|update|uninstall|status|check>");
   return { exitCode: 1, out, err };
 }
 
