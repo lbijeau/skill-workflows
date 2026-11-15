@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import assert from "node:assert";
 import * as wf from "./workflows.mjs";
+import * as sync from "./sync.mjs";
 
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
@@ -204,6 +205,229 @@ test("manifestState reports valid workflows and load errors", () => {
     eq(s.workflows.length, 0);
     assert.match(s.error, /zzz/);
     clean(root);
+  }
+});
+
+// --- sync: runner skills + registry resolution (ported from skill-router) ---
+
+const OWNED = (body = "body\n") =>
+  `---\nname: run-workflow\ndescription: d\n---\n${sync.GLOBAL_SKILL_HEADER} -->\n${body}`;
+
+const EMPTY_MANIFEST = JSON.stringify({ workflows: [] });
+const BAD_MANIFEST = JSON.stringify({ workflows: "not-an-array" });
+
+function syncRoot({ claude = false, manifest = EMPTY_MANIFEST, agents = [] } = {}) {
+  const root = tmp();
+  w(root, "agents.json", JSON.stringify({ agents }));
+  if (manifest !== null) w(root, "workflows.json", manifest);
+  w(root, claude ? "global-skills-claude/run-workflow/SKILL.md" : "global-skills/run-workflow/SKILL.md", OWNED());
+  return root;
+}
+
+const rwFiles = (home) => ["workflows.json", "agents.json"].map(f => path.join(home, "run-workflow", f));
+
+// --- syncGlobalSkills (pi) ---
+
+test("syncGlobalSkills: copies byte-identical, idempotent, skips non-skills", () => {
+  const root = tmp(); const skillsHome = tmp();
+  w(root, "agents.json", JSON.stringify({ agents: [] }));
+  w(root, "global-skills/route-skill/SKILL.md", OWNED("route\n"));
+  w(root, "global-skills/stray/readme.txt", "not a skill");
+  const r1 = sync.syncGlobalSkills(root, skillsHome);
+  eq(r1.written.length, 1);
+  eq(r1.skipped, 1);
+  const dest = path.join(skillsHome, "route-skill", "SKILL.md");
+  eq(fs.existsSync(dest), true);
+  eq(fs.readFileSync(dest, "utf8"), fs.readFileSync(path.join(root, "global-skills/route-skill/SKILL.md"), "utf8"));
+  const r2 = sync.syncGlobalSkills(root, skillsHome);
+  eq(r2.written.length, 1);
+  eq(fs.readFileSync(dest, "utf8"), fs.readFileSync(path.join(root, "global-skills/route-skill/SKILL.md"), "utf8"));
+  clean(root); clean(skillsHome);
+});
+
+test("syncGlobalSkills returns empty when global-skills/ is absent", () => {
+  const root = tmp(); const skillsHome = tmp();
+  w(root, "agents.json", JSON.stringify({ agents: [] }));
+  const r = sync.syncGlobalSkills(root, skillsHome);
+  eq(r.written.length, 0);
+  eq(r.skipped, 0);
+  eq(fs.existsSync(skillsHome) ? fs.readdirSync(skillsHome).length : 0, 0);
+  clean(root); clean(skillsHome);
+});
+
+test("syncGlobalSkills copies workflows.json AND agents.json beside the installed run-workflow skill", () => {
+  const root = syncRoot(); const skillsHome = tmp();
+  const r = sync.syncGlobalSkills(root, skillsHome);
+  eq(r.written.filter(f => f.includes("run-workflow")).length, 1);
+  const [wfJson, regJson] = rwFiles(skillsHome);
+  eq(fs.readFileSync(wfJson, "utf8"), EMPTY_MANIFEST);
+  eq(fs.readFileSync(regJson, "utf8"), JSON.stringify({ agents: [] }));
+  clean(root); clean(skillsHome);
+});
+
+test("syncGlobalSkills skips the copies silently when workflows.json is absent", () => {
+  const root = syncRoot({ manifest: null }); const skillsHome = tmp();
+  const r = sync.syncGlobalSkills(root, skillsHome);
+  eq(r.written.length, 1);
+  for (const f of rwFiles(skillsHome)) eq(fs.existsSync(f), false);
+  clean(root); clean(skillsHome);
+});
+
+test("syncGlobalSkills does not copy a malformed workflows.json (or the registry) into the installed dir", () => {
+  const root = syncRoot({ manifest: BAD_MANIFEST }); const skillsHome = tmp();
+  sync.syncGlobalSkills(root, skillsHome);
+  for (const f of rwFiles(skillsHome)) eq(fs.existsSync(f), false, f);
+  clean(root); clean(skillsHome);
+});
+
+test("syncGlobalSkills prunes stale installed copies when the repo manifest goes bad", () => {
+  const root = syncRoot(); const skillsHome = tmp();
+  sync.syncGlobalSkills(root, skillsHome);
+  for (const f of rwFiles(skillsHome)) eq(fs.existsSync(f), true, f);
+  // Repo manifest goes malformed: the stale installed copies must be pruned.
+  w(root, "workflows.json", BAD_MANIFEST);
+  sync.syncGlobalSkills(root, skillsHome);
+  for (const f of rwFiles(skillsHome)) eq(fs.existsSync(f), false, f);
+  // And when it is valid again.
+  w(root, "workflows.json", EMPTY_MANIFEST);
+  sync.syncGlobalSkills(root, skillsHome);
+  for (const f of rwFiles(skillsHome)) eq(fs.existsSync(f), true, f);
+  // And when it is removed entirely.
+  fs.rmSync(path.join(root, "workflows.json"));
+  sync.syncGlobalSkills(root, skillsHome);
+  for (const f of rwFiles(skillsHome)) eq(fs.existsSync(f), false, f);
+  clean(root); clean(skillsHome);
+});
+
+test("syncGlobalSkills never touches a user-authored installed skill (write and prune paths)", () => {
+  const root = syncRoot(); const skillsHome = tmp();
+  sync.syncGlobalSkills(root, skillsHome);
+  const dest = path.join(skillsHome, "run-workflow", "SKILL.md");
+  fs.writeFileSync(dest, "my own skill\n");
+  w(root, "workflows.json", BAD_MANIFEST);
+  const r = sync.syncGlobalSkills(root, skillsHome);
+  eq(r.refused.join(), "run-workflow");
+  eq(fs.readFileSync(dest, "utf8"), "my own skill\n");
+  // The PR #26 guard covers the prune path too: the user-owned dir's
+  // sibling copies are not pruned when the skill is refused.
+  for (const f of rwFiles(skillsHome)) eq(fs.existsSync(f), true, f);
+  clean(root); clean(skillsHome);
+});
+
+test("syncGlobalSkills refuses a symlinked destination and leaves it alone", () => {
+  const root = syncRoot(); const parent = tmp(); const skillsHome = path.join(parent, "skills");
+  w(parent, "elsewhere/SKILL.md", "someone else's\n");
+  fs.mkdirSync(path.join(skillsHome, "run-workflow"), { recursive: true });
+  fs.symlinkSync(path.join(parent, "elsewhere/SKILL.md"), path.join(skillsHome, "run-workflow", "SKILL.md"));
+  const r = sync.syncGlobalSkills(root, skillsHome);
+  eq(r.refused.join(), "run-workflow");
+  eq(fs.lstatSync(path.join(skillsHome, "run-workflow", "SKILL.md")).isSymbolicLink(), true);
+  clean(root); clean(parent);
+});
+
+// --- syncClaudeSkills (Claude Code) ---
+
+test("syncClaudeSkills: writes the skill, is idempotent, refuses unmarked and symlinked files, reports dirCreated", () => {
+  const root = syncRoot({ claude: true }); const home = path.join(tmp(), "skills");
+  const src = fs.readFileSync(path.join(root, "global-skills-claude/run-workflow/SKILL.md"), "utf8");
+  const r1 = sync.syncClaudeSkills(root, home);
+  eq(r1.written.join(), "run-workflow"); eq(r1.dirCreated, true);
+  eq(fs.readFileSync(path.join(home, "run-workflow/SKILL.md"), "utf8"), src);
+  eq(sync.syncClaudeSkills(root, home).dirCreated, false);
+  eq(sync.syncClaudeSkills(root, home).written.length, 0);
+  fs.writeFileSync(path.join(home, "run-workflow/SKILL.md"), "my own skill\n");
+  const r2 = sync.syncClaudeSkills(root, home);
+  eq(r2.refused.join(), "run-workflow"); eq(r2.written.length, 0);
+  eq(fs.readFileSync(path.join(home, "run-workflow/SKILL.md"), "utf8"), "my own skill\n");
+  fs.rmSync(path.join(home, "run-workflow/SKILL.md"));
+  w(path.dirname(home), "elsewhere/SKILL.md", src);
+  fs.symlinkSync(path.join(path.dirname(home), "elsewhere/SKILL.md"), path.join(home, "run-workflow/SKILL.md"));
+  const r3 = sync.syncClaudeSkills(root, home);
+  eq(r3.refused.join(), "run-workflow");
+  eq(fs.lstatSync(path.join(home, "run-workflow/SKILL.md")).isSymbolicLink(), true);
+  clean(root); clean(path.dirname(home));
+});
+
+test("syncClaudeSkills copies workflows.json AND agents.json beside the installed skill", () => {
+  const root = syncRoot({ claude: true }); const home = path.join(tmp(), "skills");
+  const r = sync.syncClaudeSkills(root, home);
+  eq(r.written.includes("run-workflow"), true);
+  const [wfJson, regJson] = rwFiles(home);
+  eq(fs.readFileSync(wfJson, "utf8"), EMPTY_MANIFEST);
+  eq(fs.readFileSync(regJson, "utf8"), JSON.stringify({ agents: [] }));
+  clean(root); clean(path.dirname(home));
+});
+
+test("syncClaudeSkills does not copy a malformed workflows.json (or the registry) into the installed dir", () => {
+  const root = syncRoot({ claude: true, manifest: BAD_MANIFEST }); const home = path.join(tmp(), "skills");
+  sync.syncClaudeSkills(root, home);
+  for (const f of rwFiles(home)) eq(fs.existsSync(f), false, f);
+  clean(root); clean(path.dirname(home));
+});
+
+test("syncClaudeSkills prunes stale installed copies when the repo manifest goes bad", () => {
+  const root = syncRoot({ claude: true }); const home = path.join(tmp(), "skills");
+  sync.syncClaudeSkills(root, home);
+  for (const f of rwFiles(home)) eq(fs.existsSync(f), true, f);
+  w(root, "workflows.json", BAD_MANIFEST);
+  sync.syncClaudeSkills(root, home);
+  for (const f of rwFiles(home)) eq(fs.existsSync(f), false, f);
+  w(root, "workflows.json", EMPTY_MANIFEST);
+  sync.syncClaudeSkills(root, home);
+  for (const f of rwFiles(home)) eq(fs.existsSync(f), true, f);
+  fs.rmSync(path.join(root, "workflows.json"));
+  sync.syncClaudeSkills(root, home);
+  for (const f of rwFiles(home)) eq(fs.existsSync(f), false, f);
+  clean(root); clean(path.dirname(home));
+});
+
+test("syncClaudeSkills never touches a user-authored skill's sibling copies (prune path)", () => {
+  const root = syncRoot({ claude: true }); const home = path.join(tmp(), "skills");
+  sync.syncClaudeSkills(root, home);
+  fs.writeFileSync(path.join(home, "run-workflow/SKILL.md"), "my own skill\n");
+  w(root, "workflows.json", BAD_MANIFEST);
+  const r = sync.syncClaudeSkills(root, home);
+  eq(r.refused.join(), "run-workflow");
+  eq(fs.readFileSync(path.join(home, "run-workflow/SKILL.md"), "utf8"), "my own skill\n");
+  for (const f of rwFiles(home)) eq(fs.existsSync(f), true, f);
+  clean(root); clean(path.dirname(home));
+});
+
+// --- committed runner skill bodies ---
+
+const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+
+test("pi run-workflow SKILL.md names the manifest, registry copy, subagent tool, and checkpoint rule", () => {
+  const body = fs.readFileSync(path.join(REPO_ROOT, "global-skills/run-workflow/SKILL.md"), "utf8");
+  assert(/workflows\.json/.test(body));
+  assert(/agents\.json/.test(body));
+  assert(/subagent/.test(body));
+  assert(/checkpoint/i.test(body));
+  // Registry paths are provenance docs: the skill must not tell the runner to
+  // verify them at runtime.
+  assert(!/verify.{0,40}(path|registry)/is.test(body), "must not instruct runtime path verification");
+});
+
+test("claude run-workflow SKILL.md names the manifest, registry copy, Task tool, and checkpoint rule", () => {
+  const body = fs.readFileSync(path.join(REPO_ROOT, "global-skills-claude/run-workflow/SKILL.md"), "utf8");
+  assert(/workflows\.json/.test(body));
+  assert(/agents\.json/.test(body));
+  assert(/Task tool/.test(body));
+  assert(/checkpoint/i.test(body));
+  assert(!/verify.{0,40}(path|registry)/is.test(body), "must not instruct runtime path verification");
+});
+
+test("committed skills sync byte-identically with both committed JSON files", () => {
+  for (const [fn, srcDir] of [[sync.syncGlobalSkills, "global-skills"], [sync.syncClaudeSkills, "global-skills-claude"]]) {
+    const home = path.join(tmp(), "skills");
+    fn(REPO_ROOT, home);
+    eq(fs.readFileSync(path.join(home, "run-workflow", "SKILL.md"), "utf8"),
+      fs.readFileSync(path.join(REPO_ROOT, srcDir, "run-workflow", "SKILL.md"), "utf8"));
+    eq(fs.readFileSync(path.join(home, "run-workflow", "workflows.json"), "utf8"),
+      fs.readFileSync(path.join(REPO_ROOT, "workflows.json"), "utf8"));
+    eq(fs.readFileSync(path.join(home, "run-workflow", "agents.json"), "utf8"),
+      fs.readFileSync(path.join(REPO_ROOT, "agents.json"), "utf8"));
+    clean(path.dirname(home));
   }
 });
 
