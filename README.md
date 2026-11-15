@@ -42,6 +42,13 @@ Requires Node ≥ 18. No dependencies.
 3. Print a report; a malformed `workflows.json` is a printed warning,
    never a failed install.
 
+The installed `workflows.json`/`agents.json` copies carry a top-level
+`"_generated": "skill-workflows"` provenance key (the loaders ignore unknown
+top-level keys). The sync prunes an installed copy **only when the key is
+present**: remove the key from your installed copy and it is yours — the
+prune leaves it alone. A hand-edited copy that still carries the key is
+accepted loss on a bad repo manifest.
+
 `status` is read-only: workflows count, registry count, runner presence
 per harness, Vibe mode presence, and manifest validity.
 

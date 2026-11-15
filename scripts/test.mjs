@@ -261,8 +261,12 @@ test("syncGlobalSkills copies workflows.json AND agents.json beside the installe
   const r = sync.syncGlobalSkills(root, skillsHome);
   eq(r.written.filter(f => f.includes("run-workflow")).length, 1);
   const [wfJson, regJson] = rwFiles(skillsHome);
-  eq(fs.readFileSync(wfJson, "utf8"), EMPTY_MANIFEST);
-  eq(fs.readFileSync(regJson, "utf8"), JSON.stringify({ agents: [] }));
+  const wfParsed = JSON.parse(fs.readFileSync(wfJson, "utf8"));
+  const regParsed = JSON.parse(fs.readFileSync(regJson, "utf8"));
+  eq(wfParsed[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE);
+  eq(wfParsed.workflows.length, 0); // EMPTY_MANIFEST
+  eq(regParsed[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE);
+  eq(regParsed.agents.length, 0);
   clean(root); clean(skillsHome);
 });
 
@@ -354,8 +358,8 @@ test("syncClaudeSkills copies workflows.json AND agents.json beside the installe
   const r = sync.syncClaudeSkills(root, home);
   eq(r.written.includes("run-workflow"), true);
   const [wfJson, regJson] = rwFiles(home);
-  eq(fs.readFileSync(wfJson, "utf8"), EMPTY_MANIFEST);
-  eq(fs.readFileSync(regJson, "utf8"), JSON.stringify({ agents: [] }));
+  eq(JSON.parse(fs.readFileSync(wfJson, "utf8")).workflows.length, 0);
+  eq(Array.isArray(JSON.parse(fs.readFileSync(regJson, "utf8")).agents), true);
   clean(root); clean(path.dirname(home));
 });
 
@@ -424,10 +428,14 @@ test("committed skills sync byte-identically with both committed JSON files", ()
     fn(REPO_ROOT, home);
     eq(fs.readFileSync(path.join(home, "run-workflow", "SKILL.md"), "utf8"),
       fs.readFileSync(path.join(REPO_ROOT, srcDir, "run-workflow", "SKILL.md"), "utf8"));
-    eq(fs.readFileSync(path.join(home, "run-workflow", "workflows.json"), "utf8"),
-      fs.readFileSync(path.join(REPO_ROOT, "workflows.json"), "utf8"));
-    eq(fs.readFileSync(path.join(home, "run-workflow", "agents.json"), "utf8"),
-      fs.readFileSync(path.join(REPO_ROOT, "agents.json"), "utf8"));
+    // The JSON copies differ from the repo files only by the provenance key.
+    for (const f of ["workflows.json", "agents.json"]) {
+      const copy = JSON.parse(fs.readFileSync(path.join(home, "run-workflow", f), "utf8"));
+      const repo = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, f), "utf8"));
+      eq(copy[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE);
+      delete copy[sync.PROVENANCE_KEY];
+      assert.deepEqual(copy, repo, f);
+    }
     clean(path.dirname(home));
   }
 });
@@ -568,7 +576,10 @@ test("runInstall syncs the pi and Claude runners to the given homes and writes t
     assert(fs.existsSync(path.join(skillsHome, "run-workflow", f)), `pi missing ${f}`);
     assert(fs.existsSync(path.join(claudeHome, "run-workflow", f)), `claude missing ${f}`);
   }
-  assert(fs.readFileSync(path.join(skillsHome, "run-workflow", "workflows.json"), "utf8") === ONE_WF);
+  const wfCopy = JSON.parse(fs.readFileSync(path.join(skillsHome, "run-workflow", "workflows.json"), "utf8"));
+  eq(wfCopy[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE);
+  delete wfCopy[sync.PROVENANCE_KEY];
+  assert.deepEqual(wfCopy, JSON.parse(ONE_WF));
   const toml = fs.readFileSync(path.join(vibeRoot, "agents-vibe", "workflow-orchestrator.toml"), "utf8");
   assert(toml.startsWith(gen.GENERATED_MARKER));
   clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
@@ -655,6 +666,59 @@ test("runCli dispatches install/update/status and rejects unknown modes or a cus
   eq(guard.exitCode, 1);
   assert.match(guard.err.join("\n"), /explicit/);
   clean(root); clean(skillsHome); clean(claudeHome); clean(vibeRoot);
+});
+
+// --- provenance-guarded JSON copies (workflows.json / agents.json) ---
+
+test("installed JSON copies carry the _generated provenance key; the repo files do not", () => {
+  const root = syncRoot({ agents: [A()], manifest: JSON.stringify({ workflows: [
+    { name: "review", description: "d", steps: [ { agent: "a", task: "t", output: "docs/o.md" } ] } ] }) });
+  const skillsHome = tmp();
+  sync.syncGlobalSkills(root, skillsHome);
+  for (const f of rwFiles(skillsHome)) {
+    const parsed = JSON.parse(fs.readFileSync(f, "utf8"));
+    eq(parsed[sync.PROVENANCE_KEY], sync.PROVENANCE_VALUE, f);
+  }
+  // the repo files themselves stay untouched — no key baked into the manifest
+  eq(JSON.parse(fs.readFileSync(path.join(root, "workflows.json"), "utf8"))[sync.PROVENANCE_KEY], undefined);
+  eq(JSON.parse(fs.readFileSync(path.join(root, "agents.json"), "utf8"))[sync.PROVENANCE_KEY], undefined);
+  clean(root); clean(skillsHome);
+});
+
+test("prune removes a provenance-marked installed copy when the manifest goes bad", () => {
+  const root = syncRoot(); const skillsHome = tmp();
+  sync.syncGlobalSkills(root, skillsHome); // writes marked copies
+  w(root, "workflows.json", BAD_MANIFEST);
+  sync.syncGlobalSkills(root, skillsHome);
+  for (const f of rwFiles(skillsHome)) eq(fs.existsSync(f), false, f);
+  clean(root); clean(skillsHome);
+});
+
+test("prune leaves an unmarked copy (user-owned) when the manifest goes bad", () => {
+  for (const fn of [sync.syncGlobalSkills, sync.syncClaudeSkills]) {
+    const claude = fn === sync.syncClaudeSkills;
+    const root = syncRoot({ claude }); const home = tmp();
+    fn(root, home);
+    const [wfJson] = rwFiles(home);
+    const parsed = JSON.parse(fs.readFileSync(wfJson, "utf8"));
+    delete parsed[sync.PROVENANCE_KEY];           // user removed the key: theirs now
+    fs.writeFileSync(wfJson, JSON.stringify(parsed));
+    w(root, "workflows.json", BAD_MANIFEST);
+    const r = fn(root, home);
+    eq(fs.existsSync(wfJson), true, "unmarked copy must survive the prune");
+    assert(r.keptCopies.some(f => f === wfJson), "refusal must be reported");
+    clean(root); clean(home);
+  }
+});
+
+test("loadRegistry and loadWorkflows tolerate the _generated provenance key", () => {
+  const root = tmp();
+  w(root, "agents.json", JSON.stringify({ _generated: "skill-workflows", agents: [A()] }));
+  eq(wf.loadRegistry(root).agents.length, 1);
+  w(root, "workflows.json", JSON.stringify({ _generated: "skill-workflows", workflows: [
+    { name: "review", description: "d", steps: [ { agent: "a", task: "t", output: "docs/o.md" } ] } ] }));
+  eq(wf.loadWorkflows(root).workflows.length, 1);
+  clean(root);
 });
 
 // --- uninstall: removes only what skill-workflows owns ---

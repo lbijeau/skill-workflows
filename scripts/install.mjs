@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { manifestState, loadRegistry } from "./workflows.mjs";
-import { syncGlobalSkills, syncClaudeSkills, GLOBAL_SKILL_HEADER } from "./sync.mjs";
+import { syncGlobalSkills, syncClaudeSkills, GLOBAL_SKILL_HEADER, PROVENANCE_KEY, PROVENANCE_VALUE } from "./sync.mjs";
 import { writeVibeOrchestrator, GENERATED_MARKER, VIBE_ORCHESTRATOR_NAME } from "./generate.mjs";
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -135,9 +135,15 @@ function runnerState(root, skillsHome) {
   if (!copies) return "incomplete";
   const state = manifestState(root);
   if (!state.valid) return "incomplete";
-  const expected = f => fs.readFileSync(path.join(root, f), "utf8");
+  // The installed copies carry the _generated provenance key; compare them
+  // to the repo files modulo that key.
   const inSync = ["workflows.json", "agents.json"].every(f => {
-    try { return fs.readFileSync(path.join(dir, f), "utf8") === expected(f); } catch { return false; }
+    try {
+      const copy = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+      const repo = JSON.parse(fs.readFileSync(path.join(root, f), "utf8"));
+      return copy[PROVENANCE_KEY] === PROVENANCE_VALUE
+        && (delete copy[PROVENANCE_KEY], JSON.stringify(copy) === JSON.stringify(repo));
+    } catch { return false; }
   });
   return inSync ? "installed" : "stale";
 }

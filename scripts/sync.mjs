@@ -8,6 +8,21 @@ export const GLOBAL_SKILL_MARKER = "overwritten by skill-workflows install/updat
 
 export const GLOBAL_SKILL_HEADER = "<!-- Generated-style boilerplate; " + GLOBAL_SKILL_MARKER;
 
+// Provenance marker for the installed JSON copies (workflows.json /
+// agents.json): the sync writes it, and prunes a copy ONLY if it is present.
+// A user who removes the key from their installed copy owns it — the prune
+// leaves it alone. A hand-edited copy still carrying the key is accepted
+// loss (documented in the README): the key is the ownership contract, not a
+// content hash. The loaders ignore unknown top-level keys, so its presence
+// never breaks the run-workflow skill at runtime.
+export const PROVENANCE_KEY = "_generated";
+export const PROVENANCE_VALUE = "skill-workflows";
+
+function isMarkedCopy(content) {
+  try { return JSON.parse(content)?.[PROVENANCE_KEY] === PROVENANCE_VALUE; }
+  catch { return false; }
+}
+
 // The predecessor: skill-router shipped the run-workflow skills before the
 // ADR-011 extraction, with its own boilerplate marker at the same paths.
 // Those files are install-owned (not user-authored): this repo's installer
@@ -69,15 +84,23 @@ function skillSources(root, srcDirName) {
 // the pair copies or prunes together, never one without the other.
 function syncManifestAndRegistry(root, destDir, state) {
   const manifestOk = state.valid && fs.existsSync(path.join(root, "workflows.json"));
+  const keptCopies = [];
   for (const name of ["workflows.json", "agents.json"]) {
     const dest = path.join(destDir, name);
     if (manifestOk) {
       fs.mkdirSync(destDir, { recursive: true });
-      atomicWrite(dest, fs.readFileSync(path.join(root, name), "utf8"));
+      const parsed = JSON.parse(fs.readFileSync(path.join(root, name), "utf8"));
+      parsed[PROVENANCE_KEY] = PROVENANCE_VALUE;
+      atomicWrite(dest, JSON.stringify(parsed, null, 2) + "\n");
     } else if (fs.existsSync(dest) && !isSymlink(destDir) && !isSymlink(dest)) {
-      fs.rmSync(dest);
+      // Prune only a provenance-marked copy: an unmarked one is user-owned.
+      let marked = false;
+      try { marked = isMarkedCopy(fs.readFileSync(dest, "utf8")); } catch { marked = false; }
+      if (marked) fs.rmSync(dest);
+      else keptCopies.push(dest);
     }
   }
+  return { keptCopies };
 }
 
 // Global skills live committed under global-skills/<name>/SKILL.md and are
@@ -90,8 +113,9 @@ export function syncGlobalSkills(root, skillsHome, wfState) {
   const srcDir = path.join(root, "global-skills");
   const written = [];
   const refused = [];
+  const keptCopies = [];
   let skipped = 0;
-  if (!fs.existsSync(srcDir)) return { written, skipped, refused };
+  if (!fs.existsSync(srcDir)) return { written, skipped, refused, keptCopies };
   for (const d of fs.readdirSync(srcDir, { withFileTypes: true })) {
     if (!d.isDirectory()) { skipped++; continue; }
     const src = path.join(srcDir, d.name, "SKILL.md");
@@ -106,9 +130,9 @@ export function syncGlobalSkills(root, skillsHome, wfState) {
   const state = wfState ?? manifestState(root);
   if (fs.existsSync(path.join(srcDir, "run-workflow", "SKILL.md"))
     && !refused.includes("run-workflow")) {
-    syncManifestAndRegistry(root, path.join(home, "run-workflow"), state);
+    keptCopies.push(...syncManifestAndRegistry(root, path.join(home, "run-workflow"), state).keptCopies);
   }
-  return { written, skipped, refused };
+  return { written, skipped, refused, keptCopies };
 }
 
 // Claude Code twin: same ownership contract (refused, never overwritten),
@@ -116,6 +140,7 @@ export function syncGlobalSkills(root, skillsHome, wfState) {
 // global-skills-claude/<name>/SKILL.md.
 export function syncClaudeSkills(root, skillsHome, wfState) {
   const written = [], refused = [];
+  const keptCopies = [];
   const existed = fs.existsSync(skillsHome);
   const sources = skillSources(root, "global-skills-claude");
   for (const src of sources) {
@@ -130,7 +155,7 @@ export function syncClaudeSkills(root, skillsHome, wfState) {
   const state = wfState ?? manifestState(root);
   const runWorkflow = sources.find(s => s.name === "run-workflow");
   if (runWorkflow && !refused.includes("run-workflow")) {
-    syncManifestAndRegistry(root, path.join(skillsHome, "run-workflow"), state);
+    keptCopies.push(...syncManifestAndRegistry(root, path.join(skillsHome, "run-workflow"), state).keptCopies);
   }
-  return { written, refused, dirCreated: !existed && fs.existsSync(skillsHome) };
+  return { written, refused, keptCopies, dirCreated: !existed && fs.existsSync(skillsHome) };
 }
