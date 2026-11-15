@@ -5,6 +5,7 @@ import path from "node:path";
 import assert from "node:assert";
 import * as wf from "./workflows.mjs";
 import * as sync from "./sync.mjs";
+import * as gen from "./generate.mjs";
 
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
@@ -429,6 +430,80 @@ test("committed skills sync byte-identically with both committed JSON files", ()
       fs.readFileSync(path.join(REPO_ROOT, "agents.json"), "utf8"));
     clean(path.dirname(home));
   }
+});
+
+// --- generate: Vibe workflow-orchestrator mode (ported from skill-router PR #26) ---
+
+test("renderVibeOrchestratorTOML emits a mode TOML with baked workflows", () => {
+  const toml = gen.renderVibeOrchestratorTOML([
+    { name: "design-review", description: "d", steps: [
+      { agent: "superpowers", task: "Brainstorm the feature", output: "docs/design.md" },
+      { agent: "ponytail", task: "Critique it", output: "docs/design-review.md" } ] },
+  ]);
+  assert(/agent_type = "agent"/.test(toml));
+  assert(/disabled_tools = \["skill"\]/.test(toml));
+  assert(/ask_user_question/.test(toml) && /task/.test(toml) && /write_file/.test(toml));
+  assert(toml.startsWith(gen.GENERATED_MARKER));
+  assert(toml.includes("design-review"));
+  assert(toml.includes("Brainstorm the feature"));   // task text baked, escaped
+  assert(toml.includes("docs/design.md"));
+  assert(/checkpoint/i.test(toml));                   // ADR-009 contract in prose
+  assert(/already exists and is non-empty/.test(toml)); // resume rule
+  // every workflow and step appears; no bare """ breakage from quotes in task text
+  const weird = gen.renderVibeOrchestratorTOML([
+    { name: "w", description: 'say "hi"', steps: [
+      { agent: "a", task: 'write "quoted" text', output: "docs/o.md" } ] }]);
+  assert(weird.includes('\\"quoted\\"')); // quotes escaped — no masked regression behind a disjunction
+});
+
+test("writeVibeOrchestrator writes the mode for a valid manifest, removes it when the manifest goes bad", () => {
+  const root = regRoot([A()]);
+  w(root, "workflows.json", JSON.stringify({ workflows: [
+    { name: "design-review", description: "two-step review", steps: [
+      { agent: "a", task: "write the design", output: "docs/design.md" } ] } ] }));
+  const orch = path.join(root, "agents-vibe", "workflow-orchestrator.toml");
+  const r1 = gen.writeVibeOrchestrator(root, wf.manifestState(root));
+  eq(r1.written, true);
+  eq(r1.removed, false);
+  const toml = fs.readFileSync(orch, "utf8");
+  eq(toml.includes("design-review"), true);
+  eq(toml.startsWith(gen.GENERATED_MARKER), true);
+  // malformed workflows.json → the generated file is pruned
+  w(root, "workflows.json", "{ not json !!!");
+  const r2 = gen.writeVibeOrchestrator(root, wf.manifestState(root));
+  eq(r2.written, false);
+  eq(r2.removed, true);
+  eq(fs.existsSync(orch), false);
+  // absent workflows.json → still gone, no error
+  fs.rmSync(path.join(root, "workflows.json"), { force: true });
+  const r3 = gen.writeVibeOrchestrator(root, wf.manifestState(root));
+  eq(r3.written, false);
+  eq(r3.removed, false);
+  eq(fs.existsSync(orch), false);
+  clean(root);
+});
+
+test("writeVibeOrchestrator never removes a user-authored file", () => {
+  const root = tmp();
+  const orch = path.join(root, "agents-vibe", "workflow-orchestrator.toml");
+  w(root, "agents-vibe/workflow-orchestrator.toml", "hand-written, no marker\n");
+  const r = gen.writeVibeOrchestrator(root, wf.manifestState(root)); // no workflows.json
+  eq(r.written, false);
+  eq(r.removed, false);
+  eq(fs.readFileSync(orch, "utf8"), "hand-written, no marker\n");
+  clean(root);
+});
+
+test("writeVibeOrchestrator never clobbers a user-authored file on the write path", () => {
+  const root = regRoot([A()]);
+  w(root, "workflows.json", JSON.stringify({ workflows: [
+    { name: "w", description: "d", steps: [ { agent: "a", task: "t", output: "docs/o.md" } ] } ] }));
+  w(root, "agents-vibe/workflow-orchestrator.toml", "hand-written, no marker\n");
+  const r = gen.writeVibeOrchestrator(root, wf.manifestState(root)); // valid manifest
+  eq(r.written, false);
+  eq(r.skippedUserFile, true);
+  eq(fs.readFileSync(path.join(root, "agents-vibe", "workflow-orchestrator.toml"), "utf8"), "hand-written, no marker\n");
+  clean(root);
 });
 
 // --- repo-root fixtures: the committed workflows.json validates against the committed agents.json ---

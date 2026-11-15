@@ -12,6 +12,10 @@ export function normalizeText(s, { keepNewlines = false } = {}) {
   return out.replace(/[ ]{2,}/g, " ").trim();
 }
 
+export function tomlEscape(s) {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 // "wx" refuses to follow a pre-existing path (symlink or otherwise) at tmpf,
 // so a local attacker who pre-places one at the predictable tmp path gets an
 // EEXIST instead of us writing through it.
