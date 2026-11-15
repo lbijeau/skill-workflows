@@ -23,6 +23,14 @@
         { "agent": "addyosmani", "task": "Read docs/research.md and review the architecture options against it: trade-offs, failure modes, your recommendation", "output": "docs/architecture-review.md" },
         { "agent": "ponytail", "task": "Read docs/research.md and docs/architecture-review.md and write the final verdict: which option, why, and what the other reviews got wrong", "output": "docs/verdict.md" }
       ]
+    },
+    {
+      "name": "feature-line",
+      "description": "Turn a brainstorm outcome into a dev-ready spec, then break it into sequenced tickets (agent-roster SDLC stages)",
+      "steps": [
+        { "agent": "requirements", "task": "You receive a brainstorm outcome or feature idea from the parent session for the feature. Turn it into a concise written specification: problem statement, goals, non-goals, user-visible behavior, constraints, open questions. Do not brainstorm interactively — the human dialogue happened in the parent; you only codify its result. Before acting, read the knowledge/standards/ and knowledge/decisions/ files that bear on the feature. Write your stage artifact as knowledge/specs/FEATURE-requirements.md (replace FEATURE with the feature's name). Do not spawn subagents. Surface deviations (contradictions with prior decisions, missing stakeholder input) to the orchestrator instead of improvising.", "output": "knowledge/specs/FEATURE-requirements.md" },
+        { "agent": "sprint-planning", "task": "You receive a dev-ready spec (read knowledge/specs/FEATURE-requirements.md, replacing FEATURE with the feature's name). Break it into a sequenced ticket list: small, independently verifiable tasks in dependency order. Sequencing only — no capacity or velocity estimates; if the parent asks for estimates, say sequencing-only and proceed. Flag dependencies between tickets and any spec gap that blocks sequencing. Before acting, read the knowledge/standards/ and knowledge/decisions/ files that bear on the plan. Write your stage artifact as knowledge/plans/FEATURE-sprint-planning.md. Do not spawn subagents. Surface spec gaps to the orchestrator instead of improvising scope.", "output": "knowledge/plans/FEATURE-sprint-planning.md" }
+      ]
     }
   ]
 }

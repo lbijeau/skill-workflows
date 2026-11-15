@@ -102,6 +102,18 @@ the registry only checks names — and fails at dispatch with the runner's
 stop-and-report. Accepted: the runner contract covers it; the registry's
 per-harness fields exist precisely so `status` and humans can see it.
 
+## The feature-line workflow and the per-ticket loop
+
+`feature-line` (requirements → sprint-planning) covers the front of the
+agent-roster SDLC line: it turns a brainstorm outcome into a spec, then
+into sequenced tickets. The per-ticket **test-authorship →
+code-generation loop** that follows in agent-roster's full line is
+deliberately out of scope here: it runs once per sequenced ticket, which
+is a loop driven by a human dispatcher, not a linear workflow spec. Do
+not "fix" this by bloating the spec with loop semantics — dispatch those
+stages per ticket with the runner's stop-and-report contract, or drive
+them via agent-roster's own `/sdlc-*` commands.
+
 ## The cross-repo Vibe contract
 
 Vibe loads agent TOMLs from `agent_paths` — and the user's Vibe config

@@ -25,6 +25,42 @@
       "claude": "~/.claude/agents/mattpocock.md"
     },
     {
+      "name": "triage-issues",
+      "description": "Ingests GitHub issues into the Beads queue and reports triage decisions",
+      "pi": "~/repositories/agent-roster/.pi/agents/triage-issues.md",
+      "claude": "~/repositories/agent-roster/.claude/agents/triage-issues.md"
+    },
+    {
+      "name": "requirements",
+      "description": "Converts a parent-session brainstorm outcome into a dev-ready spec before planning",
+      "pi": "~/repositories/agent-roster/.pi/agents/requirements.md",
+      "claude": "~/repositories/agent-roster/.claude/agents/requirements.md"
+    },
+    {
+      "name": "sprint-planning",
+      "description": "Breaks a spec into sequenced tickets — sequencing only in v1, no capacity estimation",
+      "pi": "~/repositories/agent-roster/.pi/agents/sprint-planning.md",
+      "claude": "~/repositories/agent-roster/.claude/agents/sprint-planning.md"
+    },
+    {
+      "name": "test-authorship",
+      "description": "Drives tests-first authorship — writes failing tests per task before implementation",
+      "pi": "~/repositories/agent-roster/.pi/agents/test-authorship.md",
+      "claude": "~/repositories/agent-roster/.claude/agents/test-authorship.md"
+    },
+    {
+      "name": "code-generation",
+      "description": "Implements one plan task to make the failing tests pass, with verification",
+      "pi": "~/repositories/agent-roster/.pi/agents/code-generation.md",
+      "claude": "~/repositories/agent-roster/.claude/agents/code-generation.md"
+    },
+    {
+      "name": "investigate",
+      "description": "Investigates a bug, regression, or unexpected behavior and returns a root-cause report — no fixes",
+      "pi": "~/repositories/agent-roster/.pi/agents/investigate.md",
+      "claude": "~/repositories/agent-roster/.claude/agents/investigate.md"
+    },
+    {
       "name": "addyosmani",
       "description": "Addy Osmani's engineering skills: architecture, performance, shipping",
       "pi": "~/repositories/skill-router/agents/addyosmani.md",

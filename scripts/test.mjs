@@ -662,14 +662,59 @@ test("runCli dispatches install/update/status and rejects unknown modes or a cus
 test("committed workflows.json validates against committed agents.json", () => {
   const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
   const { workflows } = wf.loadWorkflows(root);
-  eq(workflows.length, 3);
+  eq(workflows.length, 4);
   const { agents } = wf.loadRegistry(root);
-  eq(agents.length, 5);
+  eq(agents.length, 11);
   for (const wfEntry of workflows) {
     for (const step of wfEntry.steps) {
       assert(agents.some(a => a.name === step.agent), `unknown agent ${step.agent}`);
     }
   }
+});
+
+// --- agent-roster integration: six SDLC stage agents + the feature-line workflow ---
+
+const ROSTER_AGENTS = ["triage-issues", "requirements", "sprint-planning", "test-authorship", "code-generation", "investigate"];
+
+test("committed agents.json registers the six agent-roster stage agents with pi + claude paths and no vibe", () => {
+  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  const { agents } = wf.loadRegistry(root);
+  for (const name of ROSTER_AGENTS) {
+    const a = agents.find(x => x.name === name);
+    assert(a, `missing registry entry ${name}`);
+    assert(a.description && a.description.length > 0, `${name} needs a description`);
+    eq(a.pi, `~/repositories/agent-roster/.pi/agents/${name}.md`);
+    eq(a.claude, `~/repositories/agent-roster/.claude/agents/${name}.md`);
+    eq(a.vibe, undefined, `${name} must not carry a vibe path`);
+  }
+});
+
+test("committed workflows.json includes feature-line: requirements → sprint-planning, knowledge/ outputs", () => {
+  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  const { workflows } = wf.loadWorkflows(root);
+  const fl = workflows.find(x => x.name === "feature-line");
+  assert(fl, "missing feature-line workflow");
+  eq(fl.steps.length, 2);
+  eq(fl.steps[0].agent, "requirements");
+  eq(fl.steps[1].agent, "sprint-planning");
+  eq(fl.steps[0].output, "knowledge/specs/FEATURE-requirements.md");
+  eq(fl.steps[1].output, "knowledge/plans/FEATURE-sprint-planning.md");
+  // Council amendment: triage is NOT chained into the feature line.
+  assert(!fl.steps.some(s => s.agent === "triage-issues"), "triage must not be chained");
+});
+
+test("generated Vibe mode and skill copies include feature-line from the committed manifests", () => {
+  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  const state = wf.manifestState(root);
+  eq(state.valid, true);
+  const toml = gen.renderVibeOrchestratorTOML(state.workflows);
+  assert(toml.includes("feature-line"));
+  assert(toml.includes("requirements"));
+  assert(toml.includes("sprint-planning"));
+  // The committed-skills sync test (byte-identical workflows.json copy) covers the
+  // skill copies; here we assert the committed manifest lists it for the copies.
+  const committed = JSON.parse(fs.readFileSync(path.join(root, "workflows.json"), "utf8"));
+  assert(committed.workflows.some(x => x.name === "feature-line"));
 });
 
 process.exitCode = await (async () => {
